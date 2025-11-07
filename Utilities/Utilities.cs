@@ -6,12 +6,14 @@ using Game.Messages;
 using Game.State;
 using HarmonyLib;
 using Helpers;
+using Helpers.Culling;
 using Map.Runtime;
 using Model;
 using Model.Definition;
 using Model.Definition.Data;
+using Model.Ops;
 using Model.Ops.Definition;
-using Model.OpsNew;
+// using Model.OpsNew; // Deprecated in 2025.1.0b
 using RollingStock;
 using RollingStock.Controls;
 using System;
@@ -217,8 +219,9 @@ public class UtilitiesMod : MonoBehaviour
 			}
 		}
 
-		CullingManager.HoseDistanceBands[0] = Settings.distanceSettings.HoseRenderDistance;
-		CullingManager.Hose._cullingGroup.SetBoundingDistances(CullingManager.HoseDistanceBands);
+		// Note: Hose render distance modification removed in 2025.1.0b
+		// CullingManager internals are no longer directly accessible
+		// This feature would need to be reimplemented using the new API if needed
 	}
 
 	void OnGUI()
@@ -673,12 +676,10 @@ public static class QueryToolDistancePatch
 		if (raycastHit.collider.gameObject.layer == Layers.Track)
 		{
 			Graph graph = TrainController.Shared.graph;
-			Track.Location? location = graph.LocationFromPoint(raycastHit.point, 1f);
-			if (location != null)
+			if (graph.TryGetLocationFromGamePoint(raycastHit.point, 1f, out Track.Location location))
 			{
-				Track.Location value = location.Value;
-				float num = graph.CurvatureAtLocation(value, Graph.CurveQueryResolution.Interpolate);
-				float num2 = Mathf.Abs(graph.GradeAtLocation(value));
+				float num = graph.CurvatureAtLocation(location, Graph.CurveQueryResolution.Interpolate);
+				float num2 = Mathf.Abs(graph.GradeAtLocation(location));
 				__result = new TooltipInfo("Track", string.Format("{0:F1}%, {1:F0} deg", num2, num));
 				return false;
 			}

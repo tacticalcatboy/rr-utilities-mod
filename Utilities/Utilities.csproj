@@ -18,7 +18,6 @@
 		<Reference Include="Assembly-CSharp" />
 		<Reference Include="Definition" />
 		<Reference Include="Map.Runtime" />
-		<Reference Include="Ops" />
 		<Reference Include="VisualDesignCafe.Rendering.Nature" />
 	</ItemGroup>
 
