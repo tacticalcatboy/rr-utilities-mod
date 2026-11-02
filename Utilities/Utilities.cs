@@ -1,19 +1,16 @@
 using Character;
-using GalaSoft.MvvmLight.Messaging;
 using Game;
 using Game.Events;
 using Game.Messages;
 using Game.State;
 using HarmonyLib;
 using Helpers;
-using Helpers.Culling;
 using Map.Runtime;
 using Model;
 using Model.Definition;
 using Model.Definition.Data;
 using Model.Ops;
 using Model.Ops.Definition;
-// using Model.OpsNew; // Deprecated in 2025.1.0b
 using RollingStock;
 using RollingStock.Controls;
 using System;
@@ -28,106 +25,142 @@ using UI.PreferencesWindow;
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
-using UnityModManagerNet;
-using Utilities.UMM;
+#if HAS_NATURE_RENDERER
 using VisualDesignCafe.Rendering.Nature;
+#endif
 
 namespace Utilities;
 
 public class UtilitiesMod : MonoBehaviour
 {
-	public enum MapStates { MAINMENU, MAPLOADED, MAPUNLOADING }
+	public enum MapStates { MAINMENU, MAPLOADING, MAPLOADED, MAPUNLOADING }
 	public static MapStates MapState { get; private set; } = MapStates.MAINMENU;
 
+	public static UtilitiesMod? Instance { get; private set; }
+
 	// GUI vars
-	private static readonly GUIStyle buttonStyle = new GUIStyle() { fontSize = 8 };
 	private bool showGui = false;
 	private Rect buttonRect = new Rect(0, 30, 20, 20);
 	private Rect windowRect = new Rect(20, 30, 0, 0);
 	private Vector2 scrollPosition;
 	private Rect scrollRect;
 
+	private bool settingsShow = false;
+	private Rect settingsRect;
+	private Vector2 settingsScroll;
+
+	// Switching to sandbox is permanent in Railroader 0.6, so it needs a second click
+	private int pendingGameMode = -1;
+
 	private Rect teleportRect;
 	private int teleportLocation = -1;
 	private bool teleportShow = false;
-	private static string[] _teleportLocations;
 	private static string[] teleportLocations
 	{
 		get
 		{
-			return _teleportLocations ?? SpawnPoint.All.Where(sp => sp.name.ToLower() != "ds").Select(sp => sp.name).OrderBy(sp => sp).ToArray();
+			return SpawnPoint.All.Where(sp => sp.name.ToLower() != "ds").Select(sp => sp.name).OrderBy(sp => sp).ToArray();
 		}
 	}
 
 	private Rect loadRect;
 	private int loadIndex = -1;
 	private bool loadShow = false;
-	private static string[] _loadNames;
 	private static string[] loadNames
 	{
 		get
 		{
-			return _loadNames ?? CarPrototypeLibrary.instance.opsLoads.Select(load => load.id).ToArray();
+			return CarPrototypeLibrary.instance.opsLoads.Select(load => load.id).ToArray();
 		}
 	}
 
+	internal static UtilitiesSettings Settings => ModEntryPoint.Settings;
+	internal static RenderPipelineAsset? originalPipelineAsset;
 
-	internal Loader.UtilitiesModSettings Settings;
-	internal static RenderPipelineAsset originalPipelineAsset;
+	public static int Scale(float value) => Mathf.RoundToInt(value * Settings.UiScale);
 
-	public static UtilitiesMod Instance
+	void Awake()
 	{
-		get => Loader.Instance;
-	}
-
-	void Start()
-	{
-		Messenger.Default.Register<MapDidLoadEvent>(this, new Action<MapDidLoadEvent>(this.OnMapDidLoad));
-		Messenger.Default.Register<MapWillUnloadEvent>(this, new Action<MapWillUnloadEvent>(this.OnMapWillUnload));
-
-		if (StateManager.Shared.Storage != null)
-		{
-			OnMapDidLoad(new MapDidLoadEvent());
-		}
+		Instance = this;
 	}
 
 	void OnDestroy()
 	{
-		Messenger.Default.Unregister<MapDidLoadEvent>(this);
-		Messenger.Default.Unregister<MapWillUnloadEvent>(this);
+		OnWorldUnload();
+		MapState = MapStates.MAINMENU;
+		if (Instance == this) Instance = null;
+	}
 
-		if (originalPipelineAsset != null)
-		{
-			Destroy(QualitySettings.renderPipeline);
-			QualitySettings.renderPipeline = originalPipelineAsset;
-			originalPipelineAsset = null;
-		}
+	internal void OnWorldLoad()
+	{
+		if (MapState == MapStates.MAPLOADED) return;
+		// Wait in Update() until the world's objects and camera exist before applying settings
+		MapState = MapStates.MAPLOADING;
+		readySince = -1f;
+	}
 
-		if (MapState == MapStates.MAPLOADED)
-		{
-			OnMapWillUnload(new MapWillUnloadEvent());
-		}
+	internal void OnWorldUnload()
+	{
+		if (MapState == MapStates.MAINMENU) return;
+		MapState = MapStates.MAPUNLOADING;
+		showGui = false;
+		settingsShow = teleportShow = loadShow = false;
+		pendingGameMode = -1;
+		RestorePipelineAsset();
 		MapState = MapStates.MAINMENU;
 	}
 
-	private void OnMapDidLoad(MapDidLoadEvent evt)
+	private float readySince = -1f;
+
+	void Update()
 	{
-		if (MapState == MapStates.MAPLOADED) return;
+		if (MapState != MapStates.MAPLOADING) return;
+
+		bool ready = StateManager.Shared != null && StateManager.Shared.Storage != null
+			&& TrainController.Shared != null && Camera.main != null;
+		if (!ready) { readySince = -1f; return; }
+
+		// Give the scene a moment to finish spawning interactables
+		if (readySince < 0f) { readySince = Time.unscaledTime; return; }
+		if (Time.unscaledTime - readySince < 1f) return;
+
 		MapState = MapStates.MAPLOADED;
+		ModEntryPoint.Log("World ready, applying settings");
 		OnDistanceSettingsChanged();
 		OnGraphicsSettingsChanged();
 	}
 
-	private void OnMapWillUnload(MapWillUnloadEvent evt)
+	internal static void RestorePipelineAsset()
 	{
-		MapState = MapStates.MAPUNLOADING;
+		if (originalPipelineAsset == null) return;
+		var copy = QualitySettings.renderPipeline;
+		QualitySettings.renderPipeline = originalPipelineAsset;
+		if (copy != null && copy != originalPipelineAsset) Destroy(copy);
+		originalPipelineAsset = null;
+	}
+
+	private static void SafeRun(string what, Action action)
+	{
+		try
+		{
+			action();
+		}
+		catch (Exception ex)
+		{
+			ModEntryPoint.Warning($"{what} failed: {ex.GetBaseException().Message}");
+		}
 	}
 
 	public void OnGraphicsSettingsChanged()
 	{
 		if (MapState != MapStates.MAPLOADED) return;
+		SafeRun("Applying graphics settings", ApplyGraphicsSettings);
+		SafeRun("Applying foliage LOD", ApplyFoliageLod);
+	}
 
-		if (originalPipelineAsset == null)
+	private void ApplyGraphicsSettings()
+	{
+		if (originalPipelineAsset == null && QualitySettings.renderPipeline != null)
 		{
 			originalPipelineAsset = QualitySettings.renderPipeline;
 			QualitySettings.renderPipeline = UnityEngine.Object.Instantiate(QualitySettings.renderPipeline);
@@ -139,89 +172,118 @@ public class UtilitiesMod : MonoBehaviour
 		{
 			pipelineAsset.msaaSampleCount = (int)Settings.graphicsSettings.MSAA;
 			pipelineAsset.renderScale = Settings.graphicsSettings.SSAA;
-			var universalRenderer = pipelineAsset.GetRenderer(0) as UniversalRenderer;
-			//universalRenderer!.depthPrimingMode = Settings.graphicsSettings.DepthPrimingMode;
 		}
 
-		var cam = Camera.main.GetUniversalAdditionalCameraData();
-		if (cam != null)
+		var camera = Camera.main;
+		if (camera != null)
 		{
-
-			cam.antialiasing = Settings.graphicsSettings.PostProcessingAntiAliasing;
-			cam.antialiasingQuality = Settings.graphicsSettings.PostProcessingAntiAliasingQuality;
-			var universalRenderer = cam.scriptableRenderer as UniversalRenderer;
-			if (universalRenderer != null) universalRenderer.depthPrimingMode = Settings.graphicsSettings.DepthPrimingMode;
+			var cam = camera.GetUniversalAdditionalCameraData();
+			if (cam != null)
+			{
+				cam.antialiasing = Settings.graphicsSettings.PostProcessingAntiAliasing;
+				cam.antialiasingQuality = Settings.graphicsSettings.PostProcessingAntiAliasingQuality;
+				var universalRenderer = cam.scriptableRenderer as UniversalRenderer;
+				if (universalRenderer != null) universalRenderer.depthPrimingMode = Settings.graphicsSettings.DepthPrimingMode;
+			}
 		}
 
 		QualitySettings.lodBias = Settings.graphicsSettings.lodBias;
-		var natureRendererCameraSettings = Camera.main.GetComponent<NatureRendererCameraSettings>();
-		natureRendererCameraSettings.LodBias = Settings.graphicsSettings.lodBiasFoliage;
+	}
+
+	private void ApplyFoliageLod()
+	{
+#if HAS_NATURE_RENDERER
+		var camera = Camera.main;
+		if (camera == null) return;
+		var natureRendererCameraSettings = camera.GetComponent<NatureRendererCameraSettings>();
+		if (natureRendererCameraSettings != null)
+			natureRendererCameraSettings.LodBias = Settings.graphicsSettings.lodBiasFoliage;
+#endif
 	}
 
 	public void OnDistanceSettingsChanged()
 	{
 		if (MapState != MapStates.MAPLOADED) return;
 
-		foreach (var obj in Resources.FindObjectsOfTypeAll<SwitchStand>())
+		SafeRun("Switch stand colliders", () =>
 		{
-			var collider = obj.GetComponentInChildren<CapsuleCollider>(true);
-			collider.radius = Settings.distanceSettings.SwitchStandRadius;
-			collider.height = 1.94f + (Settings.distanceSettings.SwitchStandRadius - 0.17f) * 2f;
-		}
-
-		foreach (var obj in Resources.FindObjectsOfTypeAll<FlarePickable>())
-		{
-			var collider = obj.GetComponentInChildren<CapsuleCollider>(true);
-			collider.radius = Settings.distanceSettings.FlareRadius;
-			collider.height = 0.4f + (Settings.distanceSettings.FlareRadius - 0.09f) * 2f;
-		}
-
-		foreach (var obj in Resources.FindObjectsOfTypeAll<CouplerPickable>())
-		{
-			var collider = obj.GetComponentInChildren<CapsuleCollider>(true);
-			collider.radius = Settings.distanceSettings.CouplerRadius;
-			collider.height = 0.53f + (Settings.distanceSettings.CouplerRadius - 0.21f) * 2f;
-		}
-
-		foreach (var obj in Resources.FindObjectsOfTypeAll<GladhandClickable>())
-		{
-			var collider = obj.GetComponentInChildren<CapsuleCollider>(true);
-			collider.radius = Settings.distanceSettings.GladhandsRadius;
-			collider.height = 0.53f + (Settings.distanceSettings.GladhandsRadius - 0.21f) * 2f;
-		}
-
-		foreach (var obj in Resources.FindObjectsOfTypeAll<StationAgent>())
-		{
-			var collider = obj.GetComponentInChildren<BoxCollider>(true);
-			var delta = Settings.distanceSettings.StationRadius - 2.81f;
-			collider.size = new Vector3(1f + delta, collider.size.y, 2.81f + delta);
-		}
-
-		foreach (var obj in Resources.FindObjectsOfTypeAll<KeyValuePickableToggle>())
-		{
-			var collider = obj.GetComponentInChildren<CapsuleCollider>(true);
-			if (collider == null) continue;
-
-			if (obj.displayTitle == "Coal Chute")
+			foreach (var obj in Resources.FindObjectsOfTypeAll<SwitchStand>())
 			{
-				collider.radius = Settings.distanceSettings.CoalRadius;
-				collider.height = 4.13f + (Settings.distanceSettings.CoalRadius - 0.3f) * 2f;
+				var collider = obj.GetComponentInChildren<CapsuleCollider>(true);
+				if (collider == null) continue;
+				collider.radius = Settings.distanceSettings.SwitchStandRadius;
+				collider.height = 1.94f + (Settings.distanceSettings.SwitchStandRadius - 0.17f) * 2f;
 			}
-			else if (obj.displayTitle == "Water Spout" || obj.displayTitle == "Water Column")
-			{
-				collider.radius = Settings.distanceSettings.WaterRadius;
-				collider.height = 4.13f + (Settings.distanceSettings.WaterRadius - 0.3f) * 2f;
-			}
-			else if (obj.displayTitle == "Diesel Fueling Stand")
-			{
-				collider.radius = Settings.distanceSettings.DieselRadius;
-				collider.height = 3f + (Settings.distanceSettings.DieselRadius - 0.1f) * 2f;
-			}
-		}
+		});
 
-		// Note: Hose render distance modification removed in 2025.1.0b
-		// CullingManager internals are no longer directly accessible
-		// This feature would need to be reimplemented using the new API if needed
+		SafeRun("Flare colliders", () =>
+		{
+			foreach (var obj in Resources.FindObjectsOfTypeAll<FlarePickable>())
+			{
+				var collider = obj.GetComponentInChildren<CapsuleCollider>(true);
+				if (collider == null) continue;
+				collider.radius = Settings.distanceSettings.FlareRadius;
+				collider.height = 0.4f + (Settings.distanceSettings.FlareRadius - 0.09f) * 2f;
+			}
+		});
+
+		SafeRun("Coupler colliders", () =>
+		{
+			foreach (var obj in Resources.FindObjectsOfTypeAll<CouplerPickable>())
+			{
+				var collider = obj.GetComponentInChildren<CapsuleCollider>(true);
+				if (collider == null) continue;
+				collider.radius = Settings.distanceSettings.CouplerRadius;
+				collider.height = 0.53f + (Settings.distanceSettings.CouplerRadius - 0.21f) * 2f;
+			}
+		});
+
+		SafeRun("Gladhand colliders", () =>
+		{
+			foreach (var obj in Resources.FindObjectsOfTypeAll<GladhandClickable>())
+			{
+				var collider = obj.GetComponentInChildren<CapsuleCollider>(true);
+				if (collider == null) continue;
+				collider.radius = Settings.distanceSettings.GladhandsRadius;
+				collider.height = 0.53f + (Settings.distanceSettings.GladhandsRadius - 0.21f) * 2f;
+			}
+		});
+
+		SafeRun("Station agent colliders", () =>
+		{
+			foreach (var obj in Resources.FindObjectsOfTypeAll<StationAgent>())
+			{
+				var collider = obj.GetComponentInChildren<BoxCollider>(true);
+				if (collider == null) continue;
+				var delta = Settings.distanceSettings.StationRadius - 2.81f;
+				collider.size = new Vector3(1f + delta, collider.size.y, 2.81f + delta);
+			}
+		});
+
+		SafeRun("Coal/water/diesel colliders", () =>
+		{
+			foreach (var obj in Resources.FindObjectsOfTypeAll<KeyValuePickableToggle>())
+			{
+				var collider = obj.GetComponentInChildren<CapsuleCollider>(true);
+				if (collider == null) continue;
+
+				if (obj.displayTitle == "Coal Chute")
+				{
+					collider.radius = Settings.distanceSettings.CoalRadius;
+					collider.height = 4.13f + (Settings.distanceSettings.CoalRadius - 0.3f) * 2f;
+				}
+				else if (obj.displayTitle == "Water Spout" || obj.displayTitle == "Water Column")
+				{
+					collider.radius = Settings.distanceSettings.WaterRadius;
+					collider.height = 4.13f + (Settings.distanceSettings.WaterRadius - 0.3f) * 2f;
+				}
+				else if (obj.displayTitle == "Diesel Fueling Stand")
+				{
+					collider.radius = Settings.distanceSettings.DieselRadius;
+					collider.height = 3f + (Settings.distanceSettings.DieselRadius - 0.1f) * 2f;
+				}
+			}
+		});
 	}
 
 	void OnGUI()
@@ -233,15 +295,15 @@ public class UtilitiesMod : MonoBehaviour
 		}
 
 		selectedCar = TrainController.Shared.SelectedCar;
-		buttonRect = new Rect(0, UnityModManager.UI.Scale(30), UnityModManager.UI.Scale(20), UnityModManager.UI.Scale(20));
-		if (GUI.Button(buttonRect, "U", new GUIStyle(GUI.skin.button) { fontSize = UnityModManager.UI.Scale(10), clipping = TextClipping.Overflow })) showGui = !showGui;
+		buttonRect = new Rect(0, Scale(30), Scale(20), Scale(20));
+		if (GUI.Button(buttonRect, "U", new GUIStyle(GUI.skin.button) { fontSize = Scale(10), clipping = TextClipping.Overflow })) showGui = !showGui;
 
 		if (showGui)
 		{
-			windowRect.x = UnityModManager.UI.Scale(20);
-			windowRect.y = UnityModManager.UI.Scale(30);
+			windowRect.x = Scale(20);
+			windowRect.y = Scale(30);
 
-			windowRect = GUILayout.Window(555, windowRect, Window, "Utilities", GUIStyle.none, GUILayout.Height(Screen.height - windowRect.y), GUILayout.Width(UnityModManager.UI.Scale(270) + GUI.skin.verticalScrollbar.fixedWidth));
+			windowRect = GUILayout.Window(555, windowRect, Window, "Utilities", GUIStyle.none, GUILayout.Height(Screen.height - windowRect.y), GUILayout.Width(Scale(270) + GUI.skin.verticalScrollbar.fixedWidth));
 			if (teleportShow)
 			{
 				if (teleportRect.width > 0)
@@ -260,277 +322,57 @@ public class UtilitiesMod : MonoBehaviour
 				}
 				loadRect = GUILayout.Window(557, loadRect, LoadWindow, "Select Load Type");
 			}
+			if (settingsShow)
+			{
+				settingsRect.x = windowRect.x + windowRect.width;
+				settingsRect.y = windowRect.y;
+				settingsRect = GUILayout.Window(558, settingsRect, SettingsWindow, "Utilities Settings", GUILayout.Width(Scale(360)), GUILayout.Height(Screen.height - settingsRect.y - Scale(20)));
+			}
 		}
 	}
 
+	private void SettingsWindow(int windowId)
+	{
+		settingsScroll = GUILayout.BeginScrollView(settingsScroll);
+		SettingsGui.Draw(Settings, OnGraphicsSettingsChanged, OnDistanceSettingsChanged);
+		GUILayout.EndScrollView();
+		if (GUILayout.Button("Close")) settingsShow = false;
+	}
+
 	private Car? selectedCar;
-	public static GUIStyle styleMiddleRight;
-	public static GUIStyle styleMiddleCenter;
-	private bool doOnce;
+	public static GUIStyle? styleMiddleRight;
+	public static GUIStyle? styleMiddleCenter;
+	private readonly HashSet<string> failedSections = new HashSet<string>();
+
 	void Window(int windowId)
 	{
-		if (!doOnce)
-		{
-			styleMiddleRight = new GUIStyle(GUI.skin.textField) { alignment = TextAnchor.MiddleRight };
-			styleMiddleCenter = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleCenter };
-			doOnce = true;
-		}
-
-		var stateManager = StateManager.Shared;
-		
-		GUIStyle centeredLabel = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleCenter };
+		styleMiddleRight ??= new GUIStyle(GUI.skin.textField) { alignment = TextAnchor.MiddleRight };
+		styleMiddleCenter ??= new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleCenter };
 
 		scrollPosition = GUILayout.BeginScrollView(scrollPosition, GUI.skin.window, GUILayout.ExpandHeight(false));
 		using (new GUILayout.VerticalScope())
 		{
-			using (new GUILayout.VerticalScope("box"))
+			if (GUILayout.Button(settingsShow ? "Hide Settings" : "Settings (graphics / click distances)"))
 			{
-				GUILayout.Label("Game Mode", styleMiddleCenter, GUILayout.ExpandWidth(true));
-
-				GUILayout.BeginHorizontal();
-				int gameMode = (int)stateManager.GameMode;
-				GUILayout.FlexibleSpace();
-				if (UnityModManager.UI.ToggleGroup(ref gameMode, Enum.GetNames(typeof(GameMode))))
-					StateManager.ApplyLocal(new PropertyChange("_game", "mode", new IntPropertyValue((int)gameMode)));
-				GUILayout.FlexibleSpace();
-				GUILayout.EndHorizontal();
+				settingsShow = !settingsShow;
+				teleportShow = loadShow = false;
 			}
 
-			using (new GUILayout.VerticalScope("box"))
-			{
-				GUILayout.Label("Time Controls", styleMiddleCenter, GUILayout.ExpandWidth(true));
+			Section("Game Mode", DrawGameMode);
+			Section("Time Controls", DrawTimeControls);
+			Section("Teleport Locations", DrawTeleport);
+			Section("Weather Presets", DrawWeather);
 
-				GUILayout.Label("Time: " + TimeWeather.TimeOfDayString);
-				if (StateManager.CheckAuthorizedToSendMessage(default(WaitTime)))
-				{
-					GUILayout.BeginHorizontal();
-					if (GUILayout.Button("Wait 1 Hour"))
-					{
-						StateManager.ApplyLocal(new WaitTime { Hours = 1f });
-					}
-					if (GUILayout.Button("    Sleep    "))
-					{
-						float currentHours = TimeWeather.Now.Hours;
-						int interchangeServeHour = stateManager.Storage.InterchangeServeHour;
-						float hours = ((currentHours < (float)interchangeServeHour) ? ((float)interchangeServeHour - currentHours) : (24f - currentHours + (float)interchangeServeHour));
-						StateManager.ApplyLocal(new WaitTime { Hours = hours });
-					}
-					GUILayout.EndHorizontal();
-				}
-			}
-
-			using (new GUILayout.VerticalScope("box"))
-			{
-				GUILayout.Label("Teleport Locations", styleMiddleCenter, GUILayout.ExpandWidth(true));
-
-				if (GUILayout.Button("Teleport to Dispatch Station"))
-				{
-					new TeleportCommand().Execute(new string[] { "/tp", "ds" });
-				}
-				if (GUILayout.Button("Choose Location"))
-				{
-					teleportShow = !teleportShow;
-					loadShow = false;
-					teleportLocation = -1;
-				}
-			}
-
-			using (new GUILayout.VerticalScope("box"))
-			{
-				GUILayout.Label("Weather Presets", styleMiddleCenter, GUILayout.ExpandWidth(true));
-
-				GUILayout.BeginHorizontal();
-				int selected = -1;
-				string[] weather = TimeWeather.WeatherIdLookup.Keys.Select(key => char.ToUpper(key[0]) + key.Substring(1)).OrderBy(x => x).ToArray();
-				selected = GUILayout.SelectionGrid(selected, weather, 2);
-				if (selected != -1)
-				{
-					StateManager.ApplyLocal(new PropertyChange("_game", "weatherId", new IntPropertyValue(TimeWeather.WeatherIdLookup[weather[selected].ToLower()])));
-				}
-				GUILayout.EndHorizontal();
-			}
-
-
-			if (StateManager.IsSandbox && StateManager.IsHost)
+			if (IsSandboxHost())
 			{
 				GUILayout.Label("Sandbox shortcuts", styleMiddleCenter, GUILayout.ExpandWidth(true));
-				using (new GUILayout.VerticalScope("box"))
-				{
-					GUILayout.Label("Money", styleMiddleCenter, GUILayout.ExpandWidth(true));
-
-					GUILayout.BeginHorizontal();
-					GUILayout.Label("Money: ");
-					GUILayout.Label(stateManager.GetBalance().ToString("C0"), styleMiddleRight);
-					//GUILayout.Button("Set");
-					GUILayout.EndHorizontal();
-
-					if (StateManager.IsHost)
-					{
-						GUILayout.BeginHorizontal();
-						if (GUILayout.Button("> $1k"))
-							AddMoney(1000);
-						if (GUILayout.Button("> $10k"))
-							AddMoney(10000);
-						if (GUILayout.Button("> $100k"))
-							AddMoney(100000);
-						if (GUILayout.Button("> $1M"))
-							AddMoney(1000000);
-						GUILayout.EndHorizontal();
-						GUILayout.BeginHorizontal();
-						if (GUILayout.Button("< $1k"))
-							AddMoney(-1000);
-						if (GUILayout.Button("< $10k"))
-							AddMoney(-10000);
-						if (GUILayout.Button("< $100k"))
-							AddMoney(-100000);
-						if (GUILayout.Button("< $1M"))
-							AddMoney(-1000000);
-						GUILayout.EndHorizontal();
-					}
-				}
-
-				using (new GUILayout.VerticalScope("box"))
-				{
-					GUILayout.Label("Train info", styleMiddleCenter, GUILayout.ExpandWidth(true));
-
-					GUILayout.Label("Selected Loco/Car: " + (selectedCar ? CarInspector.TitleForCar(selectedCar) : "None"));
-
-					if (selectedCar != null)
-					{
-						GUILayout.Label(CarInspector.SubtitleForCar(selectedCar));
-						GUILayout.Label($"Speed: {(Mathf.Abs(selectedCar.velocity) * 2.23694f),4:N1} mph");
-
-						int count = selectedCar.Definition.LoadSlots.Count;
-
-						for (int i = 0; i < count; i++)
-						{
-							CarLoadInfo? loadInfo = selectedCar.GetLoadInfo(i);
-							if (loadInfo != null)
-							{
-								CarLoadInfo value = loadInfo.Value;
-								Load load = CarPrototypeLibrary.instance.LoadForId(value.LoadId);
-								if (load != null)
-									GUILayout.Label($"Load: {value.LoadString(load)}");
-							}
-						}
-					}
-				}
+				Section("Money", DrawMoney);
+				Section("Train info", DrawTrainInfo);
 				if (selectedCar != null)
 				{
-					int loadSlots = selectedCar.Definition.LoadSlots.Count;
-					using (new GUILayout.VerticalScope("box"))
-					{
-
-						GUILayout.Label("Repair", styleMiddleCenter, GUILayout.ExpandWidth(true));
-						if (GUILayout.Button("Repair Car"))
-						{
-							selectedCar.SetCondition(1f);
-						}
-						if (GUILayout.Button("Repair Train"))
-						{
-							List<Car> list = TrainController.Shared.SelectedTrain.Where((Car car) => car.Definition.Archetype.IsFreight()).ToList<Car>();
-
-							foreach (Car car in TrainController.Shared.SelectedTrain)
-								car.SetCondition(1f);
-						}
-					}
-
-					using (new GUILayout.VerticalScope("box"))
-					{
-						GUILayout.Label("Fill/Empty", styleMiddleCenter, GUILayout.ExpandWidth(true));
-
-						GUILayout.BeginHorizontal();
-						if (GUILayout.Button("Fill Car") && TrainController.Shared.SelectedCar)
-						{
-							for (int i = 0; i < loadSlots; i++)
-							{
-								LoadSlot loadSlot = selectedCar.Definition.LoadSlots[i];
-								if (!string.IsNullOrEmpty(loadSlot.RequiredLoadIdentifier))
-									selectedCar.SetLoadInfo(i, (new CarLoadInfo(loadSlot.RequiredLoadIdentifier, loadSlot.MaximumCapacity)));
-							}
-						}
-						if (GUILayout.Button("Empty Car") && TrainController.Shared.SelectedCar)
-						{
-							for (int i = 0; i < loadSlots; i++)
-							{
-								selectedCar.SetLoadInfo(i, null);
-							}
-						}
-						GUILayout.EndHorizontal();
-
-						GUILayout.BeginHorizontal();
-						if (GUILayout.Button("Fill Train") && TrainController.Shared.SelectedCar)
-						{
-							foreach (var car in TrainController.Shared.SelectedTrain.Where((Car car) => car.Definition.Archetype.IsFreight()).ToList<Car>())
-							{
-								for (int i = 0; i < loadSlots; i++)
-								{
-									LoadSlot loadSlot = car.Definition.LoadSlots[i];
-									if (!string.IsNullOrEmpty(loadSlot.RequiredLoadIdentifier))
-										car.SetLoadInfo(i, new CarLoadInfo?(new CarLoadInfo(loadSlot.RequiredLoadIdentifier, loadSlot.MaximumCapacity)));
-								}
-							}
-						}
-						if (GUILayout.Button("Empty Train") && TrainController.Shared.SelectedCar)
-						{
-							foreach (var car in TrainController.Shared.SelectedTrain.Where((Car car) => car.Definition.Archetype.IsFreight()).ToList<Car>())
-							{
-								for (int i = 0; i < loadSlots; i++)
-								{
-									car.SetLoadInfo(i, null);
-								}
-							}
-						}
-						GUILayout.EndHorizontal();
-					}
-
-					using (new GUILayout.VerticalScope("box"))
-					{
-						GUILayout.Label("Load/Unload", styleMiddleCenter, GUILayout.ExpandWidth(true));
-						GUILayout.BeginHorizontal();
-						GUILayout.Label("Load:", GUILayout.ExpandWidth(false));
-						if (GUILayout.Button((loadIndex == -1 ? "Select Load" : loadNames[loadIndex])))
-						{
-							loadShow = !loadShow;
-							teleportShow = false;
-							loadIndex = -1;
-						}
-						GUILayout.EndHorizontal();
-
-						GUILayout.BeginHorizontal();
-						if (GUILayout.Button("Load Car") && TrainController.Shared.SelectedCar && loadIndex >= 0)
-						{
-							new UI.Console.SetLoadCommand().SetLoad(selectedCar, loadNames[loadIndex], new string[] { "/setload", selectedCar.id, loadNames[loadIndex], "100%" });
-						}
-						if (GUILayout.Button("Empty Car") && TrainController.Shared.SelectedCar)
-						{
-							for (int i = 0; i < loadSlots; i++)
-							{
-								selectedCar.SetLoadInfo(i, null);
-							}
-						}
-						GUILayout.EndHorizontal();
-
-						GUILayout.BeginHorizontal();
-						if (GUILayout.Button("Load Train") && TrainController.Shared.SelectedCar && loadIndex >= 0)
-						{
-							foreach (var car in TrainController.Shared.SelectedTrain.Where((Car car) => car.Definition.Archetype.IsFreight()).ToList<Car>())
-							{
-								new UI.Console.SetLoadCommand().SetLoad(car, loadNames[loadIndex], new string[] { "/setload", car.id, loadNames[loadIndex], "100%" });
-							}
-						}
-						if (GUILayout.Button("Empty Train") && TrainController.Shared.SelectedCar)
-						{
-							foreach (var car in TrainController.Shared.SelectedTrain.Where((Car car) => car.Definition.Archetype.IsFreight()).ToList<Car>())
-							{
-								for (int i = 0; i < loadSlots; i++)
-								{
-									car.SetLoadInfo(i, null);
-								}
-							}
-						}
-						GUILayout.EndHorizontal();
-					}
+					Section("Repair", DrawRepair);
+					Section("Fill/Empty", DrawFillEmpty);
+					Section("Load/Unload", DrawLoadUnload);
 				}
 			}
 		}
@@ -542,13 +384,267 @@ public class UtilitiesMod : MonoBehaviour
 		}
 	}
 
+	/// <summary>
+	/// Draws one boxed section. Each section is its own method so that a game API that changed
+	/// in a newer Railroader build only breaks that section (logged once), not the whole window.
+	/// </summary>
+	private void Section(string title, Action draw)
+	{
+		if (failedSections.Contains(title)) return;
+		using (new GUILayout.VerticalScope("box"))
+		{
+			GUILayout.Label(title, styleMiddleCenter, GUILayout.ExpandWidth(true));
+			try
+			{
+				draw();
+			}
+			catch (Exception ex) when (ex is not ExitGUIException)
+			{
+				failedSections.Add(title);
+				ModEntryPoint.Warning($"'{title}' section disabled: {ex.GetBaseException().GetType().Name}: {ex.GetBaseException().Message}");
+			}
+		}
+	}
+
+	private static bool IsSandboxHost() => StateManager.IsSandbox && StateManager.IsHost;
+
+	private void DrawGameMode()
+	{
+		var stateManager = StateManager.Shared;
+		string[] modes = Enum.GetNames(typeof(GameMode));
+		int gameMode = (int)stateManager.GameMode;
+		int sandbox = Array.IndexOf(modes, "Sandbox");
+
+		GUILayout.Label("Current: " + modes[gameMode], styleMiddleCenter);
+
+		// Railroader 0.6 made converting a game to sandbox permanent (it protects progression
+		// state), so leaving sandbox is not offered and entering it needs a confirmation.
+		if (gameMode == sandbox)
+		{
+			GUILayout.Label("Sandbox is permanent for this save.", styleMiddleCenter);
+			return;
+		}
+
+		using (new GUILayout.HorizontalScope())
+		{
+			GUILayout.FlexibleSpace();
+			int selected = GUILayout.Toolbar(gameMode, modes);
+			GUILayout.FlexibleSpace();
+			if (selected != gameMode)
+			{
+				if (selected == sandbox) pendingGameMode = selected;
+				else ApplyGameMode(selected);
+			}
+		}
+
+		if (pendingGameMode == sandbox)
+		{
+			GUILayout.Label("<b>Converting to sandbox is permanent and can't be undone.</b>", new GUIStyle(GUI.skin.label) { richText = true, wordWrap = true });
+			using (new GUILayout.HorizontalScope())
+			{
+				if (GUILayout.Button("Convert to Sandbox")) { ApplyGameMode(sandbox); pendingGameMode = -1; }
+				if (GUILayout.Button("Cancel")) pendingGameMode = -1;
+			}
+		}
+	}
+
+	private static void ApplyGameMode(int mode)
+	{
+		StateManager.ApplyLocal(new PropertyChange("_game", "mode", new IntPropertyValue(mode)));
+	}
+
+	private void DrawTimeControls()
+	{
+		var stateManager = StateManager.Shared;
+		GUILayout.Label("Time: " + TimeWeather.TimeOfDayString);
+		if (!StateManager.CheckAuthorizedToSendMessage(default(WaitTime))) return;
+
+		using (new GUILayout.HorizontalScope())
+		{
+			if (GUILayout.Button("Wait 1 Hour"))
+			{
+				StateManager.ApplyLocal(new WaitTime { Hours = 1f });
+			}
+			if (GUILayout.Button("    Sleep    "))
+			{
+				float currentHours = TimeWeather.Now.Hours;
+				int interchangeServeHour = stateManager.Storage.InterchangeServeHour;
+				float hours = ((currentHours < (float)interchangeServeHour) ? ((float)interchangeServeHour - currentHours) : (24f - currentHours + (float)interchangeServeHour));
+				StateManager.ApplyLocal(new WaitTime { Hours = hours });
+			}
+		}
+	}
+
+	private void DrawTeleport()
+	{
+		if (GUILayout.Button("Teleport to Dispatch Station"))
+		{
+			Teleport("ds");
+		}
+		if (GUILayout.Button("Choose Location"))
+		{
+			teleportShow = !teleportShow;
+			loadShow = settingsShow = false;
+			teleportLocation = -1;
+		}
+	}
+
+	private static void Teleport(string location)
+	{
+		SafeRun($"Teleport to {location}", () => new TeleportCommand().Execute(new string[] { "/tp", location }));
+	}
+
+	private void DrawWeather()
+	{
+		string[] weather = TimeWeather.WeatherIdLookup.Keys.Select(key => char.ToUpper(key[0]) + key.Substring(1)).OrderBy(x => x).ToArray();
+		int selected = GUILayout.SelectionGrid(-1, weather, 2);
+		if (selected != -1)
+		{
+			StateManager.ApplyLocal(new PropertyChange("_game", "weatherId", new IntPropertyValue(TimeWeather.WeatherIdLookup[weather[selected].ToLower()])));
+		}
+	}
+
+	private void DrawMoney()
+	{
+		using (new GUILayout.HorizontalScope())
+		{
+			GUILayout.Label("Money: ");
+			GUILayout.Label(StateManager.Shared.GetBalance().ToString("C0"), styleMiddleRight);
+		}
+
+		using (new GUILayout.HorizontalScope())
+		{
+			if (GUILayout.Button("> $1k")) AddMoney(1000);
+			if (GUILayout.Button("> $10k")) AddMoney(10000);
+			if (GUILayout.Button("> $100k")) AddMoney(100000);
+			if (GUILayout.Button("> $1M")) AddMoney(1000000);
+		}
+		using (new GUILayout.HorizontalScope())
+		{
+			if (GUILayout.Button("< $1k")) AddMoney(-1000);
+			if (GUILayout.Button("< $10k")) AddMoney(-10000);
+			if (GUILayout.Button("< $100k")) AddMoney(-100000);
+			if (GUILayout.Button("< $1M")) AddMoney(-1000000);
+		}
+	}
+
+	private void DrawTrainInfo()
+	{
+		GUILayout.Label("Selected Loco/Car: " + (selectedCar != null ? CarInspector.TitleForCar(selectedCar) : "None"));
+		if (selectedCar == null) return;
+
+		GUILayout.Label(CarInspector.SubtitleForCar(selectedCar));
+		GUILayout.Label($"Speed: {(Mathf.Abs(selectedCar.velocity) * 2.23694f),4:N1} mph");
+
+		int count = selectedCar.Definition.LoadSlots.Count;
+		for (int i = 0; i < count; i++)
+		{
+			CarLoadInfo? loadInfo = selectedCar.GetLoadInfo(i);
+			if (loadInfo != null)
+			{
+				CarLoadInfo value = loadInfo.Value;
+				Load load = CarPrototypeLibrary.instance.LoadForId(value.LoadId);
+				if (load != null)
+					GUILayout.Label($"Load: {value.LoadString(load)}");
+			}
+		}
+	}
+
+	private static IEnumerable<Car> SelectedFreightCars()
+	{
+		return TrainController.Shared.SelectedTrain.Where(car => car.Definition.Archetype.IsFreight()).ToList();
+	}
+
+	private void DrawRepair()
+	{
+		var car = selectedCar!;
+		if (GUILayout.Button("Repair Car"))
+		{
+			car.SetCondition(1f);
+		}
+		if (GUILayout.Button("Repair Train"))
+		{
+			foreach (Car c in TrainController.Shared.SelectedTrain)
+				c.SetCondition(1f);
+		}
+	}
+
+	private static void FillCar(Car car)
+	{
+		var slots = car.Definition.LoadSlots;
+		for (int i = 0; i < slots.Count; i++)
+		{
+			LoadSlot loadSlot = slots[i];
+			if (!string.IsNullOrEmpty(loadSlot.RequiredLoadIdentifier))
+				car.SetLoadInfo(i, new CarLoadInfo(loadSlot.RequiredLoadIdentifier, loadSlot.MaximumCapacity));
+		}
+	}
+
+	private static void EmptyCar(Car car)
+	{
+		// Use each car's own slot count (the old code reused the selected car's count for the whole train)
+		int count = car.Definition.LoadSlots.Count;
+		for (int i = 0; i < count; i++)
+			car.SetLoadInfo(i, null);
+	}
+
+	private static void LoadCar(Car car, string loadId)
+	{
+		new UI.Console.SetLoadCommand().SetLoad(car, loadId, new string[] { "/setload", car.id, loadId, "100%" });
+	}
+
+	private void DrawFillEmpty()
+	{
+		var car = selectedCar!;
+		using (new GUILayout.HorizontalScope())
+		{
+			if (GUILayout.Button("Fill Car")) FillCar(car);
+			if (GUILayout.Button("Empty Car")) EmptyCar(car);
+		}
+		using (new GUILayout.HorizontalScope())
+		{
+			if (GUILayout.Button("Fill Train")) foreach (var c in SelectedFreightCars()) FillCar(c);
+			if (GUILayout.Button("Empty Train")) foreach (var c in SelectedFreightCars()) EmptyCar(c);
+		}
+	}
+
+	private void DrawLoadUnload()
+	{
+		var car = selectedCar!;
+		string[] names = loadNames;
+		if (loadIndex >= names.Length) loadIndex = -1;
+
+		using (new GUILayout.HorizontalScope())
+		{
+			GUILayout.Label("Load:", GUILayout.ExpandWidth(false));
+			if (GUILayout.Button(loadIndex == -1 ? "Select Load" : names[loadIndex]))
+			{
+				loadShow = !loadShow;
+				teleportShow = settingsShow = false;
+				loadIndex = -1;
+			}
+		}
+
+		using (new GUILayout.HorizontalScope())
+		{
+			if (GUILayout.Button("Load Car") && loadIndex >= 0) LoadCar(car, names[loadIndex]);
+			if (GUILayout.Button("Empty Car")) EmptyCar(car);
+		}
+		using (new GUILayout.HorizontalScope())
+		{
+			if (GUILayout.Button("Load Train") && loadIndex >= 0) foreach (var c in SelectedFreightCars()) LoadCar(c, names[loadIndex]);
+			if (GUILayout.Button("Empty Train")) foreach (var c in SelectedFreightCars()) EmptyCar(c);
+		}
+	}
+
 	private void TeleportWindow(int windowId)
 	{
-		teleportLocation = GUILayout.SelectionGrid(teleportLocation, teleportLocations, 2);
+		string[] locations = teleportLocations;
+		teleportLocation = GUILayout.SelectionGrid(teleportLocation, locations, 2);
 		if (teleportLocation != -1)
 		{
 			teleportShow = false;
-			new TeleportCommand().Execute(new string[] { "/tp", teleportLocations[teleportLocation] });
+			Teleport(locations[teleportLocation]);
 			teleportLocation = -1;
 		}
 	}
@@ -562,7 +658,7 @@ public class UtilitiesMod : MonoBehaviour
 		}
 	}
 
-	private void AddMoney(int amount)
+	private static void AddMoney(int amount)
 	{
 		var sm = StateManager.Shared;
 		sm.Balance = sm.Balance + amount;
@@ -575,7 +671,7 @@ public static class SwitchStandMaxDistancePatch
 {
 	public static bool Prefix(ref float __result)
 	{
-		__result = Loader.Settings.distanceSettings.SwitchStandDistance;
+		__result = ModEntryPoint.Settings.distanceSettings.SwitchStandDistance;
 		
 		return false;
 	}
@@ -586,7 +682,7 @@ public static class FlareMaxDistancePatch
 {
 	public static bool Prefix(ref float __result)
 	{
-		__result = Loader.Settings.distanceSettings.FlareDistance;
+		__result = ModEntryPoint.Settings.distanceSettings.FlareDistance;
 
 		return false;
 	}
@@ -597,7 +693,7 @@ public static class CouplerMaxDistancePatch
 {
 	public static bool Prefix(ref float __result)
 	{
-		__result = Loader.Settings.distanceSettings.CouplerDistance;
+		__result = ModEntryPoint.Settings.distanceSettings.CouplerDistance;
 
 		return false;
 	}
@@ -608,7 +704,7 @@ public static class GladhandsMaxDistancePatch
 {
 	public static bool Prefix(ref float __result)
 	{
-		__result = Loader.Settings.distanceSettings.GladhandsDistance;
+		__result = ModEntryPoint.Settings.distanceSettings.GladhandsDistance;
 
 		return false;
 	}
@@ -619,7 +715,7 @@ public static class StationAgentMaxDistancePatch
 {
 	public static bool Prefix(ref float __result)
 	{
-		__result = Loader.Settings.distanceSettings.StationDistance;
+		__result = ModEntryPoint.Settings.distanceSettings.StationDistance;
 
 		return false;
 	}
@@ -630,7 +726,7 @@ public static class IndustryMaxDistancePatch
 {
 	public static bool Prefix(ref float __result)
 	{
-		__result = Loader.Settings.distanceSettings.IndustryDistance;
+		__result = ModEntryPoint.Settings.distanceSettings.IndustryDistance;
 
 		return false;
 	}
@@ -643,17 +739,17 @@ public static class CoalWaterDieselMaxDistancePatch
 	{
 		if (__instance.displayTitle == "Coal Chute")
 		{
-			__result = Loader.Settings.distanceSettings.CoalDistance;
+			__result = ModEntryPoint.Settings.distanceSettings.CoalDistance;
 			return false;
 		}
 		else if (__instance.displayTitle == "Water Spout" || __instance.displayTitle == "Water Column")
 		{
-			__result = Loader.Settings.distanceSettings.WaterDistance;
+			__result = ModEntryPoint.Settings.distanceSettings.WaterDistance;
 			return false;
 		}
 		else if (__instance.displayTitle == "Diesel Fueling Stand")
 		{
-			__result = Loader.Settings.distanceSettings.DieselDistance;
+			__result = ModEntryPoint.Settings.distanceSettings.DieselDistance;
 			return false;
 		}
 		
@@ -668,7 +764,7 @@ public static class QueryToolDistancePatch
 	public static bool Prefix(ref TooltipInfo __result, Ray ray)
 	{
 		RaycastHit raycastHit;
-		if (!Physics.Raycast(ray, out raycastHit, Loader.Settings.distanceSettings.QueryDistance, (1 << Layers.Terrain) | (1 << Layers.Track)))
+		if (!Physics.Raycast(ray, out raycastHit, ModEntryPoint.Settings.distanceSettings.QueryDistance, (1 << Layers.Terrain) | (1 << Layers.Track)))
 		{
 			__result = TooltipInfo.Empty;
 			return false;
@@ -711,15 +807,12 @@ public static class SetQualityLevelPatch
 
 	public static bool Prefix(int value)
 	{
-		if (UtilitiesMod.originalPipelineAsset != null)
-			QualitySettings.renderPipeline = UtilitiesMod.originalPipelineAsset;
+		// Put the game's own pipeline asset back (and drop our copy) before switching quality
+		// level, then let the mod make a fresh copy of the new level's asset and re-apply.
+		UtilitiesMod.RestorePipelineAsset();
 		QualitySettings.SetQualityLevel(value);
-		UtilitiesMod.originalPipelineAsset = QualitySettings.renderPipeline;
-		QualitySettings.renderPipeline = UnityEngine.Object.Instantiate(QualitySettings.renderPipeline);
-
 		UtilitiesMod.Instance?.OnGraphicsSettingsChanged();
 		return false;
-		
 	}
 }
 

@@ -1,5 +1,6 @@
 # Local reference configuration
 Directory.Build.targets
+Directory.Build.props
 
 # Local preferences
 .vscode/

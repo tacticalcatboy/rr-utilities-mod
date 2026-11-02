@@ -1,0 +1,12 @@
+{
+	"identifier": "vanguard/rr-utilities",
+	"version": "2.0.0",
+	"name": "RR Utilities",
+	"author": "Vanguard",
+	"url": "https://www.nexusmods.com/railroader/mods/19/",
+	"description": "Graphics tweaks (SSAA, MSAA, FXAA/SMAA, LOD), longer click distances for switches, couplers, flares, hoses and loaders, plus time, weather, teleport and sandbox helpers. Ported to the Railroader 0.6 mod loader.",
+	"assemblies": ["Utilities.dll"],
+	"dependencies": {
+		"required": ["rr/game >=0.6.0"]
+	}
+}

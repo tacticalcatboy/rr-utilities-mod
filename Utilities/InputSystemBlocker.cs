@@ -48,6 +48,6 @@ public class InputSystemBlocker : MonoBehaviour
 		if (Instance != null) { return; }
 		Instance = new GameObject("Input System Blocker", typeof(InputSystemBlocker));
 		if (parent) Instance.transform.SetParent(parent, false);
-		DontDestroyOnLoad(Instance);
+		else DontDestroyOnLoad(Instance);
 	}
 }

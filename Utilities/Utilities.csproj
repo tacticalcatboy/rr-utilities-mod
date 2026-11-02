@@ -1,58 +1,95 @@
 <Project Sdk="Microsoft.NET.Sdk">
+	<!--
+		Railroader 0.6 native DLL mod (no Unity Mod Manager).
+		Set GameDir in Directory.Build.targets (copy Directory.Build.targets.example) or pass -p:GameDir=...
+		GameDir is the folder that contains Railroader_Data.
+	-->
 	<PropertyGroup>
 		<AssemblyName>Utilities</AssemblyName>
+		<RootNamespace>Utilities</RootNamespace>
 		<TargetFramework>net48</TargetFramework>
 		<LangVersion>latest</LangVersion>
 		<Nullable>enable</Nullable>
-		<WarningsAsErrors>CS8600;CS8602;CS8603</WarningsAsErrors>
+		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+		<Version>2.0.0</Version>
+		<AssemblyVersion>2.0.0.0</AssemblyVersion>
+		<FileVersion>2.0.0.0</FileVersion>
 	</PropertyGroup>
 
-	<!-- Krafs Publicizer -->
+	<PropertyGroup>
+		<ManagedDir>$(GameDir)/Railroader_Data/Managed</ManagedDir>
+	</PropertyGroup>
+
+	<!-- Optional game assemblies. Their code paths compile out if a game build drops them. -->
+	<PropertyGroup Condition="Exists('$(ManagedDir)/VisualDesignCafe.Rendering.Nature.dll')">
+		<DefineConstants>$(DefineConstants);HAS_NATURE_RENDERER</DefineConstants>
+	</PropertyGroup>
+
+	<!-- Krafs Publicizer: lets us read the game's private members without reflection -->
 	<ItemGroup>
-		<Publicize Include="Assembly-CSharp" IncludeCompilerGeneratedMembers="false" />
-		<Publicize Include="Map.Runtime" IncludeCompilerGeneratedMembers="false" />
+		<Publicize Include="Railroader" IncludeCompilerGeneratedMembers="false" />
+		<Publicize Include="Map.Runtime" IncludeCompilerGeneratedMembers="false" Condition="Exists('$(ManagedDir)/Map.Runtime.dll')" />
 	</ItemGroup>
 
-	<!-- Railroader -->
+	<!-- Railroader (compile-time only; never shipped) -->
 	<ItemGroup>
-		<Reference Include="Assembly-CSharp" />
-		<Reference Include="Definition" />
-		<Reference Include="Map.Runtime" />
-		<Reference Include="VisualDesignCafe.Rendering.Nature" />
+		<GameReference Include="Railroader.Modding" />
+		<GameReference Include="Railroader" />
+		<GameReference Include="Core" Condition="Exists('$(ManagedDir)/Core.dll')" />
+		<GameReference Include="KeyValue.Runtime" Condition="Exists('$(ManagedDir)/KeyValue.Runtime.dll')" />
+		<GameReference Include="Definition" Condition="Exists('$(ManagedDir)/Definition.dll')" />
+		<GameReference Include="Map.Runtime" Condition="Exists('$(ManagedDir)/Map.Runtime.dll')" />
+		<GameReference Include="VisualDesignCafe.Rendering.Nature" Condition="Exists('$(ManagedDir)/VisualDesignCafe.Rendering.Nature.dll')" />
+		<GameReference Include="Newtonsoft.Json" />
+		<GameReference Include="Unity.InputSystem" />
+		<GameReference Include="Unity.RenderPipelines.Core.Runtime" Condition="Exists('$(ManagedDir)/Unity.RenderPipelines.Core.Runtime.dll')" />
+		<GameReference Include="Unity.RenderPipelines.Universal.Runtime" />
+		<GameReference Include="UnityEngine" />
+		<GameReference Include="UnityEngine.CoreModule" />
+		<GameReference Include="UnityEngine.IMGUIModule" />
+		<GameReference Include="UnityEngine.InputLegacyModule" Condition="Exists('$(ManagedDir)/UnityEngine.InputLegacyModule.dll')" />
+		<GameReference Include="UnityEngine.PhysicsModule" />
+		<GameReference Include="UnityEngine.TextRenderingModule" />
 	</ItemGroup>
 
-	<!-- Unity -->
 	<ItemGroup>
-		<Reference Include="UnityEngine" />
-		<Reference Include="UnityEngine.CoreModule" />
-		<Reference Include="UnityEngine.IMGUIModule" />
-		<Reference Include="UnityEngine.PhysicsModule" />
-		<Reference Include="UnityEngine.TextRenderingModule" />
-		<Reference Include="Unity.InputSystem" />
-		<Reference Include="Unity.RenderPipelines.Universal.Runtime" />
+		<Reference Include="@(GameReference)">
+			<HintPath>$(ManagedDir)/%(Identity).dll</HintPath>
+			<Private>false</Private>
+		</Reference>
 	</ItemGroup>
 
-	<!-- Mod Loader -->
 	<ItemGroup>
-		<PackageReference Include="Krafs.Publicizer" Version="2.2.1" />
-		<PackageReference Include="UnityModManager" Version="0.27.5" PrivateAssets="all" />
-	</ItemGroup>
-
-	<!-- Null Checking -->
-	<ItemGroup>
-		<PackageReference Include="Microsoft.CSharp" Version="4.7.0" />
+		<PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+		<PackageReference Include="Krafs.Publicizer" Version="2.2.1" PrivateAssets="all" />
+		<!-- 0Harmony.dll ships next to Utilities.dll; it is not listed in Info.json "assemblies". -->
+		<PackageReference Include="Lib.Harmony" Version="2.3.6" />
 		<PackageReference Include="Nullable" Version="1.3.1" PrivateAssets="all" />
 	</ItemGroup>
 
-	<Target Name="PostBuild" AfterTargets="PostBuildEvent">
-		<!-- Copy to build folder -->
-		<Copy SourceFiles="$(TargetPath)" DestinationFolder="../build/" />
+	<Target Name="CheckGameDir" BeforeTargets="ResolveAssemblyReferences">
+		<Error Condition="!Exists('$(ManagedDir)/Railroader.Modding.dll')" Text="Railroader 0.6+ not found at '$(GameDir)'. Copy Directory.Build.props.example to Directory.Build.props and set GameDir, or build with -p:GameDir=..." />
+	</Target>
 
-		<!-- Package after Release build -->
-		<Exec Condition="'$(ConfigurationName)' == 'Release' And '$(OS)' == 'Windows_NT'" Command="powershell -executionpolicy bypass -Command &quot;(../package.ps1)&quot;" />
-		<Exec Condition="'$(ConfigurationName)' == 'Release' And '$(OS)' != 'Windows_NT'" Command="pwsh -Command &quot;(../package.ps1)&quot;" />
-		<!-- Copy to game install folder -->
-		<Exec Condition="Exists('$(RrInstallDir)') And '$(OS)' == 'Windows_NT'" Command="powershell -executionpolicy bypass -Command &quot;(../package.ps1 -NoArchive -OutputDirectory '$(RrInstallDir)\Mods')&quot;" />
-		<Exec Condition="Exists('$(RrInstallDir)') And '$(OS)' != 'Windows_NT'" Command="pwsh  -Command &quot;(../package.ps1 -NoArchive -OutputDirectory '$(RrInstallDir)/Mods')&quot;" />
+	<!-- Stage the mod folder: build/Utilities/{Info.json, Utilities.dll, 0Harmony.dll, LICENSE} -->
+	<Target Name="StageMod" AfterTargets="Build">
+		<PropertyGroup>
+			<StageDir>$(MSBuildThisFileDirectory)../build/Utilities</StageDir>
+		</PropertyGroup>
+		<ItemGroup>
+			<StageFile Include="$(TargetPath)" />
+			<StageFile Include="$(OutDir)0Harmony.dll" />
+			<StageFile Include="$(MSBuildThisFileDirectory)../Info.json;$(MSBuildThisFileDirectory)../LICENSE" />
+		</ItemGroup>
+		<RemoveDir Directories="$(StageDir)" />
+		<Copy SourceFiles="@(StageFile)" DestinationFolder="$(StageDir)" />
+		<Message Importance="high" Text="Mod folder: $(StageDir)" />
+
+		<!-- Copy straight into the game's Mods folder when GameDir is set and CopyToGame isn't false -->
+		<Copy Condition="'$(CopyToGame)' != 'false' AND Exists('$(GameDir)/Railroader_Data')" SourceFiles="@(StageFile)" DestinationFolder="$(GameDir)/Mods/Utilities" />
+
+		<!-- Release builds also produce dist/Utilities_v<version>.zip -->
+		<MakeDir Condition="'$(Configuration)' == 'Release'" Directories="$(MSBuildThisFileDirectory)../dist" />
+		<ZipDirectory Condition="'$(Configuration)' == 'Release'" SourceDirectory="$(MSBuildThisFileDirectory)../build" DestinationFile="$(MSBuildThisFileDirectory)../dist/Utilities_v$(Version).zip" Overwrite="true" />
 	</Target>
 </Project>

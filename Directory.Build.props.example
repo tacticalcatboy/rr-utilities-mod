@@ -1,0 +1,12 @@
+<Project>
+	<!-- Copy this file to Directory.Build.props (git-ignored) and set GameDir. -->
+	<PropertyGroup>
+		<!-- The Railroader install folder, the one that contains Railroader_Data. Examples:
+		     Windows: C:\Program Files (x86)\Steam\steamapps\common\Railroader
+		     Linux:   /home/you/.local/share/Steam/steamapps/common/Railroader -->
+		<GameDir>C:\Program Files (x86)\Steam\steamapps\common\Railroader</GameDir>
+
+		<!-- Set to false to stop builds from copying into <GameDir>/Mods/Utilities -->
+		<CopyToGame>true</CopyToGame>
+	</PropertyGroup>
+</Project>
